@@ -7,42 +7,45 @@ import os, sys
 from tqdm import tqdm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Check for CUDA
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# print(f"Using device: {device}")
+print(f"Using device: {device}")
 
 
-# EMG baseline v.04.2
 class EMGCell(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(EMGCell, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
 
+        # Define linear transformations
+        self.combined_transform = nn.Linear(input_size + hidden_size, 2 * hidden_size)
+
         self.init_weights()
 
     def init_weights(self):
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_uniform_(param)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
+        nn.init.xavier_uniform_(self.combined_transform.weight)
+        nn.init.zeros_(self.combined_transform.bias)
 
     def forward(self, input, hidden):
-        m_prev, c_prev = hidden
+        h_prev, c_prev = hidden
 
-        # Combine input and previous hidden state
-        merges = input + m_prev
-        context = input + c_prev
+        # Combine input and previous hidden states
+        merge = torch.cat((input, h_prev), dim=-1)
 
-        # Apply activations
-        i = torch.tanh(merges)
-        m = torch.sigmoid(merges)
+        # Apply transformations
+        gates = self.combined_transform(merge)
+        retain_gate, merge_gate = torch.chunk(gates, 2, dim=-1)
+        retain_gate = torch.sigmoid(retain_gate)
+        merge_gate = torch.sigmoid(merge_gate)
+
+        r = retain_gate * input
 
         # Calculate output
-        m_next = i * m
-        c_next = torch.tanh(context) - i
+        c_next = torch.tanh(c_prev + r)
+        m_next = merge_gate * input + (1 - merge_gate) * c_next
 
         return m_next, c_next
 
@@ -54,62 +57,62 @@ class EMG(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.cells = nn.ModuleList(
-            [EMGCell(input_size if i == 0 else hidden_size, hidden_size) for i in range(num_layers)])
+            [EMGCell(input_size if i == 0 else hidden_size, hidden_size) for i in range(num_layers)]
+        )
 
     def forward(self, x, hidden=None):
         batch_size, seq_len, _ = x.size()
 
         if hidden is None:
-            hidden = [(torch.zeros(batch_size, self.hidden_size).to(x.device),
-                       torch.zeros(batch_size, self.hidden_size).to(x.device)) for _ in range(self.num_layers)]
+            hidden = [
+                (torch.zeros(batch_size, self.hidden_size, device=x.device),
+                 torch.zeros(batch_size, self.hidden_size, device=x.device))
+                for _ in range(self.num_layers)
+            ]
 
-        mem_seq = []
-        con_seq = []
+        outputs = []
 
         for t in range(seq_len):
             layer_input = x[:, t, :]
-            mem_layers = []
-            con_layers = []
+            layer_outputs = []
 
             for layer_idx, cell in enumerate(self.cells):
                 m_prev, c_prev = hidden[layer_idx]
                 m_next, c_next = cell(layer_input, (m_prev, c_prev))
                 hidden[layer_idx] = (m_next, c_next)
                 layer_input = m_next
+                layer_outputs.append(m_next)
 
-                mem_layers.append(m_next)
-                con_layers.append(c_next)
+            outputs.append(torch.stack(layer_outputs, dim=1))
 
-            mem_seq.append(torch.stack(mem_layers, dim=1))
-            con_seq.append(torch.stack(con_layers, dim=1))
+        output = torch.stack(outputs, dim=1)
+        mem = output
+        con = torch.stack([h[1] for h in hidden], dim=1).unsqueeze(1).expand(-1, seq_len, -1, -1)
 
-        mem = torch.stack(mem_seq, dim=1)
-        con = torch.stack(con_seq, dim=1)
-        output = mem + torch.relu(con)
+        final_output = output
 
-        return output, mem, con
+        return final_output, mem, con
 
-# Define the LSTM model
+
 class EMGLanguageModel(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers):
         super(EMGLanguageModel, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.emg = EMG(embedding_dim, hidden_dim, num_layers)
-        self.fc = nn.Linear(hidden_dim * num_layers, vocab_size)
+        self.fc = nn.Linear(hidden_dim, vocab_size)
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
+
+
     def forward(self, x, hidden=None):
-        batch_size, seq_len = x.size()
         embedded = self.embedding(x)
-
-        output, mem, con = self.emg(embedded)
-
-        # Reshape output to (batch_size, seq_len, num_layers * hidden_dim)
-        output = output.view(batch_size, seq_len, -1)
-
-        # Pass through the fully connected layer
+        output, mem, con = self.emg(embedded, hidden)
+        output = output.view(-1, self.hidden_dim)
         logits = self.fc(output)
+
+        # Reshape logits back to (batch_size, seq_len, vocab_size)
+        logits = logits.view(x.size(0), x.size(1), -1)
 
         return logits, (mem[:, -1], con[:, -1])
 
@@ -120,8 +123,9 @@ class TextDataset(Dataset):
         self.seq_length = seq_length
 
         with open(file_path, 'r', encoding='utf-8') as f:
-            text = f.read()
+            lines = f.readlines()
 
+        text = '\n'.join([f"<s> {line.strip()} </s>" for line in lines])
         self.data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
 
     def __len__(self):
@@ -148,7 +152,8 @@ def calculate_accuracy(output, targets):
 def train_tokenizer(file_path, vocab_size=30000):
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<pad>", "<unk>", "<sos>", "<eos>"])
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<pad>", "<unk>", "<sos>", "<eos>"],
+                                  min_frequency=2)
 
     tokenizer.train(files=[file_path], trainer=trainer)
 
@@ -210,11 +215,11 @@ def main():
     VOCAB_SIZE = 100000
     EMBEDDING_DIM = 650
     HIDDEN_DIM = 650
-    NUM_LAYERS = 4
+    NUM_LAYERS = 1
     BATCH_SIZE = 64
     NUM_EPOCHS = 3
     LEARNING_RATE = 0.001
-    SEQ_LENGTH = 64
+    SEQ_LENGTH = 60
 
     # File paths
     corpus_file = sys.argv[1]
@@ -224,7 +229,7 @@ def main():
         HIDDEN_DIM = int(sys.argv[3])
     if sys.argv[4]:
         NUM_LAYERS = int(sys.argv[4])
-    model_name = "EMG_04.2_E" + str(EMBEDDING_DIM) + "_H" +str(HIDDEN_DIM)+ "x" + str(NUM_LAYERS)
+    model_name = "eMG_RNN_base_" +str(HIDDEN_DIM)+ "x" + str(NUM_LAYERS)
 
     # Train tokenizer
     tokenizer = train_tokenizer(corpus_file, VOCAB_SIZE)
@@ -240,11 +245,11 @@ def main():
                             )
 
     # Initialize model
-    model = EMGLanguageModel(VOCAB_SIZE, EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS)
-    model.padding_idx = tokenizer.pad_token_id
+    model = EMGLanguageModel(tokenizer.vocab_size, EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS)
+    # model.padding_idx = tokenizer.pad_token_id
 
     print(
-        f"Building EMG baseline network (EMG_04.02_BPE) with these hyperparameters:\nVOCAB_SIZE={VOCAB_SIZE}, EMBEDDING_DIM={EMBEDDING_DIM}, HIDDEN_DIM={HIDDEN_DIM}, NUM_LAYERS={NUM_LAYERS}")
+        f"Building EMG network {model_name} with these hyperparameters:\nVOCAB_SIZE={tokenizer.vocab_size}, EMBEDDING_DIM={EMBEDDING_DIM}, HIDDEN_DIM={HIDDEN_DIM}, NUM_LAYERS={NUM_LAYERS}")
 
     # Multi-GPU setup
     if torch.cuda.device_count() > 1:
@@ -254,8 +259,8 @@ def main():
     model = model.to(device)
 
     # Define loss and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
 
     # Training loop
     for epoch in range(NUM_EPOCHS):
