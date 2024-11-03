@@ -30,7 +30,7 @@ source /home/your_environment/.bashrc
 conda activate your_environment
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/
 
-srun python model_eMG_RNN.py ../data/eng/processed/all_eng.txt 650 650 1 conversational
+srun python train_eMG_RNN_BPE.py ../data/eng/processed/all_eng.txt 650 650 1 conversational
 ```
 Required python packages (to be installed before running the script):
 
