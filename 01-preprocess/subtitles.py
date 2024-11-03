@@ -2,57 +2,66 @@ import sys
 import os
 import re
 import utils
+from tqdm import tqdm
 from smart_open import open
-from normalize import clean
-import regex as rex
+import ftfy
+from line_profiler import LineProfiler
 
 d_in = sys.argv[1]
 d_out = sys.argv[2]
 target_file = "subtitles.txt"
 text_original = ""
 text_cleaned = ""
+text_cleaned_lines = []
+text_original_lines = []
 n_files = 0
+n = 0
 utils.profiling_init(utils)
+re_line_begin=re.compile(r'^[|=0123456789]')
+
 print("\n===SUBTITLES data processing===\nOpening files in '" + d_in + "':")
 
 def preprocess(line):
-    if re.match(r'^[|=0123456789]', line) or utils.is_empty_line(line):
-        return ""
-    else:
-        line = ' '.join(line.strip().split())
-        line = clean(line, minimal=True)
-        line = line.lower()
-        line = utils.normalize_abbreviations(line)
-        line = utils.handle_acronyms(line)
-        line = re.sub(r'ã ','à', line)
-        line = re.sub("ãƒâƒã'â", "à", line)
-        line = re.sub("ãƒâƒã'â¨ãƒâƒã'â¨", "è", line)
-        line = re.sub("<i>","",line)
-        line = utils.remove_quotes(line)
-        line = utils.remove_symbols(line)
-        line = re.sub(r'(\w)?([;.!?…])(\w)?', r'\1\2\n\3', line) # split lines after strong punctuation, ad hoc, from from utils.space_punctuation (: removed from regex)
-        line = re.sub(r'(\s)?([;.!?…])(\s)*', r'\1\2\n', line) #ad hoc, from utils.space_punctuation (: removed from regex)
-        line = re.sub(r'([.,:;!?()\[\]])', r' \1', line)  # add space before punctuation (from utils.space_punctuation)
-        line = re.sub(r'\. (\. )+', r' ... ', line)  # pauses (from utils.space_punctuation)
-        line = re.sub(r'([,:()\[\]/])', r'\1 ', line)  #add space after these symbols, ad hoc (from utils.space_punctuation)
-        line = rex.sub(r'\n[\p{P}\s]*', '\n', line) #replace newline followed by any punctuation or whitespace with a single newline
-        line = utils.add_full_stop(line.strip())
-        line = re.sub (r'^[!\"#$%&\'*+,-./:;<=>?@\^_{|}~\s]+','', line) #ad hoc, clean line beginning (no removal of () and [] at line beginning)
-        line = utils.remove_multiple_spacing(line)
-        return line+"\n"
+    line = ' '.join(line.strip().split())
+    line = ftfy.fix_text(line)
+    line = utils.normalize_abbreviations(line)
+    line = utils.handle_acronyms(line)
+    line = line.lower()
+    line = line.replace('ã ', 'à')
+    line = line.replace('ãƒâƒãâ', 'à')
+    line = line.replace("ãƒâƒã'â¨ãƒâƒã'â¨", "è")
+    line = line.replace("s", "t'")
+    line = line.replace("<i>", "")
+    line = utils.remove_quotes(line)
+    line = utils.remove_symbols(line)
+    line = utils.remove_brackets(line)
+    line = utils.space_punctuation(line)
+    line = utils.normalize_quotes(line)
+    line = utils.add_full_stop(line)
+    line = utils.remove_multiple_spacing(line)
+    return utils.remove_last_newline(line) + "\n"
 
+profiler = LineProfiler()
+profiler.add_function(preprocess)
+profiler.enable()
 
 for file in os.listdir(d_in):
     print(".", end="")
     n_files += 1
+    with open(d_in + file, 'r', encoding='utf-8') as f:
+        total_lines = sum(1 for _ in f)
     with open(d_in + file, encoding='utf8') as f:
-        prev_line = ""
-        for line in f:
-            text_original += line+"\n"
-            if prev_line != line and len(line)>0:
-                prev_line = line
-                text_cleaned += preprocess(line)
-            
+        for line in tqdm(f, total=total_lines, desc='Processing Lines', miniters=10000):
+            text_original_lines.append(line + "\n")
+            if not (re_line_begin.match(line) or utils.is_empty_line(line)):
+                text_cleaned_lines.append(preprocess(line))
+
+text_cleaned = ''.join(text_cleaned_lines)
+text_original = ''.join(text_original_lines)
+
+profiler.disable()
+profiler.print_stats()
+
 utils.report(n_files, text_original, text_cleaned)
 utils.save(d_out, target_file, text_original, text_cleaned)
 utils.profiling_end(utils)

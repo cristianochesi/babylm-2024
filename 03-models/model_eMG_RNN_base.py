@@ -22,7 +22,7 @@ class EMGCell(nn.Module):
 
         # Define linear transformations
         self.combined_transform = nn.Linear(input_size + hidden_size, 2 * hidden_size)
-
+		
         self.init_weights()
 
     def init_weights(self):
@@ -118,25 +118,58 @@ class EMGLanguageModel(nn.Module):
 
 # Dataset class
 class TextDataset(Dataset):
-    def __init__(self, file_path, tokenizer, seq_length):
+    def __init__(self, file_path, tokenizer, seq_length, chunk_size=1000000,
+                 add_special_tokens=True, start_token="<s>", end_token="</s>"):
         self.tokenizer = tokenizer
         self.seq_length = seq_length
+        self.chunk_size = chunk_size
+        self.add_special_tokens = add_special_tokens
+        self.start_token = start_token
+        self.end_token = end_token
 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"The file {file_path} does not exist.")
 
-        text = '\n'.join([f"<s> {line.strip()} </s>" for line in lines])
-        self.data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+        self.file_path = file_path
+        self.data = self.load_and_tokenize_data()
+
+    def load_and_tokenize_data(self):
+        tokenized_data = []
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            while True:
+                chunk = f.readlines(self.chunk_size)
+                if not chunk:
+                    break
+
+                if self.add_special_tokens:
+                    chunk = [f"{self.start_token} {line.strip()} {self.end_token}" for line in chunk]
+                else:
+                    chunk = [line.strip() for line in chunk]
+
+                text = ' '.join(chunk)
+                tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                tokenized_data.extend(tokens)
+
+        if not tokenized_data:
+            raise ValueError("The input file is empty or couldn't be processed.")
+
+        return torch.tensor(tokenized_data, dtype=torch.long)
 
     def __len__(self):
-        return max(0, len(self.data) - self.seq_length - 1)
+        return max(0, len(self.data) - self.seq_length)
 
     def __getitem__(self, idx):
-        if idx + self.seq_length + 1 > len(self.data):
-            idx = len(self.data) - self.seq_length - 1
+        if idx < 0 or idx >= len(self):
+            raise IndexError("Index out of bounds")
 
         input_seq = self.data[idx:idx + self.seq_length]
         target_seq = self.data[idx + 1:idx + self.seq_length + 1]
+
+        # Pad sequences if they're shorter than seq_length
+        if len(input_seq) < self.seq_length:
+            padding = torch.zeros(self.seq_length - len(input_seq), dtype=torch.long)
+            input_seq = torch.cat([input_seq, padding])
+            target_seq = torch.cat([target_seq, padding])
 
         return input_seq, target_seq
 
@@ -152,8 +185,7 @@ def calculate_accuracy(output, targets):
 def train_tokenizer(file_path, vocab_size=30000):
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<pad>", "<unk>", "<sos>", "<eos>"],
-                                  min_frequency=2)
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<pad>", "<unk>", "<s>", "</s>"], min_frequency=2)
 
     tokenizer.train(files=[file_path], trainer=trainer)
 
@@ -170,7 +202,7 @@ def train(model, dataloader, optimizer, criterion, device, clip_grad_norm=1.0):
     total_loss = 0
     total_accuracy = 0
 
-    progress_bar = tqdm(dataloader, desc="Training")
+    progress_bar = tqdm(dataloader, desc="Training", mininterval=600.0, miniters=10000)
 
     for batch, targets in progress_bar:
         batch, targets = batch.to(device), targets.to(device)
@@ -201,7 +233,7 @@ def train(model, dataloader, optimizer, criterion, device, clip_grad_norm=1.0):
         progress_bar.set_postfix({
             'loss': f'{loss.item():.4f}',
             'acc': f'{accuracy:.4f}'
-        })
+            })
 
     avg_loss = total_loss / len(dataloader)
     avg_accuracy = total_accuracy / len(dataloader)
@@ -229,7 +261,7 @@ def main():
         HIDDEN_DIM = int(sys.argv[3])
     if sys.argv[4]:
         NUM_LAYERS = int(sys.argv[4])
-    model_name = "eMG_RNN_base_" +str(HIDDEN_DIM)+ "x" + str(NUM_LAYERS)
+    model_name = "eMG_RNN_base_IT_3M_minfreq2_" +str(HIDDEN_DIM)+ "x" + str(NUM_LAYERS)
 
     # Train tokenizer
     tokenizer = train_tokenizer(corpus_file, VOCAB_SIZE)
@@ -246,10 +278,10 @@ def main():
 
     # Initialize model
     model = EMGLanguageModel(tokenizer.vocab_size, EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS)
-    # model.padding_idx = tokenizer.pad_token_id
+    model.padding_idx = tokenizer.pad_token_id
 
     print(
-        f"Building EMG network {model_name} with these hyperparameters:\nVOCAB_SIZE={tokenizer.vocab_size}, EMBEDDING_DIM={EMBEDDING_DIM}, HIDDEN_DIM={HIDDEN_DIM}, NUM_LAYERS={NUM_LAYERS}")
+        f"Building EMG network {model_name} with these hyperparameters:\nVOCAB_SIZE={tokenizer.vocab_size}, HIDDEN_DIM={HIDDEN_DIM}, NUM_LAYERS={NUM_LAYERS}")
 
     # Multi-GPU setup
     if torch.cuda.device_count() > 1:

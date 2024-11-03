@@ -1,5 +1,5 @@
-import os
 import json
+import os
 from math import log
 
 
@@ -7,7 +7,7 @@ class MorPiece:
     def __init__(self, vocab_size=30000, min_frequency=2, cutoff=8, bf=10, special_tokens=None):
         self.tokenization_to_print = "TP left-right \t BF right-left \t TP right-left \t BP right-left\n" # for debugging only
         if special_tokens is None:
-            special_tokens = ['[unk]', '[pad]', '[sos]', '[eos]', '[pause]']
+            special_tokens = ['[unk]', '[pad]', '[sos]', '[eos]', '[end]', '[pause]']
         self.special_tokens = special_tokens
         self.reserved_keys = {'[RSX]', '##', 'IDX', '++'}
         self.vocab_size = vocab_size
@@ -38,7 +38,7 @@ class MorPiece:
 
     def train(self, corpus):  # create the vocabulary
         words = corpus.split()
-        print("MorPiece tokenizer training: processing words...")
+        print("MorPiece tokenizer training: Processing words...")
         for word in words:
             word_alpha = ''.join([char for char in word if char.isalpha() or char == "'"])
             if not word_alpha:
@@ -58,7 +58,7 @@ class MorPiece:
 
         sort_trie_by_freq(self.roots_unoptimized)
         sort_trie_by_freq(self.infls)
-        print("MorPiece tokenizer training: trie optimization...")
+        print(f"MorPiece tokenizer training: Tokens optimization with parameters CUTOFF={self.cutoff}, BRANCHING_FACTOR={self.bf}, MIN_FREQUENCY={self.min_frequency})")
         self.optimize(self.types)
 
     def build_trie(self, wordpiece, root):  # build the trie and register # of traversals in '##'
@@ -96,14 +96,14 @@ class MorPiece:
             if len(self.tokens) > 1:
                 self.split_suffix(word[::-1], self.infls)
                 self.suffixes = [word[::-1] for word in self.suffixes][::-1]
-                self.tokenization_to_print += str(self.tokens) + '\t' + str(self.tokens_bf) + '\t' + str(self.suffixes) + '\t' + str(self.suffixes_bf) + '\n'# for debugging only
+                self.tokenization_to_print += str(self.tokens) + '\t' + str(self.tokens_bf) + '\t'+ str(self.suffixes) + '\t' + str(self.suffixes_bf) + '\n'# for debugging only
                 for i in range(0, len(self.tokens)): # esperimenti: usare solo self.suffixes o self.tokens (prefissi)
                     if i == 0:
                         self.last_item_in_trie = self.roots
-                        self.add_items_to_trie(self.tokens[0])  # esperimenti: usare solo self.suffixes o self.tokens (prefissi)
+                        self.add_items_to_trie(self.tokens[0]) # esperimenti: usare solo self.suffixes o self.tokens (prefissi)
                     else:
                         self.last_item_in_trie = self.roots['++']
-                        self.add_items_to_trie(self.tokens[i])  # esperimenti: usare solo self.suffixes o self.tokens (prefissi)
+                        self.add_items_to_trie(self.tokens[i]) # esperimenti: usare solo self.suffixes o self.tokens (prefissi)
                     if 'IDX' not in self.last_item_in_trie:
                         self.last_item_in_trie['IDX'] = self.idx
                         self.idx += 1
@@ -195,7 +195,7 @@ class MorPiece:
                 self.n_prefix = trie[prefix]["##"]
                 self.n_suffix = trie[prefix][suffix]["##"]
 
-    def check_tp(self, m, d):  # verify if Tolerance Principle applies between m(other) and d(aughter) nodes
+    def check_tp(self, m, d): # verify if Tolerance Principle applies
         if not m > 1:
             return False
         else:
@@ -205,7 +205,7 @@ class MorPiece:
         else:
             return False
 
-    def get_bf(self, m): # return the branching factor of the mother node
+    def get_bf(self, m):  # return the branching factor of the mother node
         keys = m.keys()
         n_keys = len(keys)
         for k in keys:

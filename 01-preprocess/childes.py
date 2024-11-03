@@ -16,7 +16,6 @@ print("\n===CHILDES data processing===\nOpening files in '" + d_in + "':")
 
 def preprocess(line):
     line = ' '.join(line.strip().split())  # Remove extra spaces
-    line = clean(line, minimal=True)       # Apply minimal cleaning
     line = line[6:]                        # Remove the first 6 characters
     line = re.sub(r'&[\-\+]','', line)     # Remove patterns like &- or &+
     line = re.sub(r'\[.*?\]','', line)     # Remove anything inside square brackets
