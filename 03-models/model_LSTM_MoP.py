@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-import MorPiece as MoP
+import tokenizer_MorPiece as MoP
 import os, sys, re
 from tqdm import tqdm
 

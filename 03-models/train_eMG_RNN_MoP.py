@@ -3,7 +3,7 @@ import sys
 
 import torch
 import torch.nn as nn
-from data_Prepare import TextDataset
+from data_Batching import PrepareDataset
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim.lr_scheduler import StepLR
@@ -113,8 +113,12 @@ def main():
     NUM_LAYERS = 1
     BATCH_SIZE = 64
     NUM_EPOCHS = 100
-    LEARNING_RATE = 0.001
-    SEQ_LENGTH = 60
+    LEARNING_RATE = 0.002
+    DROP_OUT = 0.2
+    SEQ_LENGTH = 74
+    REGIMEN = 'naturalistic'  # naturalistic = [[sentence_1], [sentence_2], ...];
+    # conversational = [[sentence_1, sentence_2], [sentence_2, sentence_3], ...]
+    # default/redundant = [[1, 2, ..., SEQ_LENGTH], [2, ..., SEQ_LENGTH+1], ...]
 
     # Main training loop with early stopping
     patience = 3
@@ -123,9 +127,10 @@ def main():
 
     cutoff = 100
     bf = 15
-    min_frequency = 2
+    min_frequency = 3
+    add_special_tokens = False
 
-    # File paths
+    # arguments passed inline: fullpath/corpus_text_file, EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS, REGIMEN
     corpus_file = sys.argv[1]
     if sys.argv[2]:
         EMBEDDING_DIM = int(sys.argv[2])
@@ -133,7 +138,9 @@ def main():
         HIDDEN_DIM = int(sys.argv[3])
     if sys.argv[4]:
         NUM_LAYERS = int(sys.argv[4])
-    model_name = "eMG_RNN_MoP_E" + str(EMBEDDING_DIM) + "_H" + str(HIDDEN_DIM) + "x" + str(NUM_LAYERS)
+    if sys.argv[5]:
+        REGIMEN = sys.argv[5]
+    model_name = 'EN_100M_MoP_eMG_RNN_' + REGIMEN + '_E' + str(EMBEDDING_DIM) + '_H' + str(HIDDEN_DIM) + 'x' + str(NUM_LAYERS)
 
     # Train tokenizer
     tokenizer = MoP(vocab_size=VOCAB_SIZE, cutoff=cutoff, min_frequency=min_frequency, bf=bf)
@@ -150,13 +157,13 @@ def main():
     print(f"Tokenizer config saved in {model_name}")
 
     # Create dataset and dataloader
-    dataset = TextDataset(corpus_file, tokenizer, SEQ_LENGTH, add_line_ending_tokens=True)
+    dataset = PrepareDataset(corpus_file, tokenizer, SEQ_LENGTH, add_special_tokens=add_special_tokens, regimen=REGIMEN)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=2, collate_fn=collate_fn)
 
     # Initialize model
-    model = EMGLanguageModel(tokenizer.get_vocab_size(), EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS)
+    model = EMGLanguageModel(tokenizer.get_vocab_size(), EMBEDDING_DIM, HIDDEN_DIM, NUM_LAYERS, DROP_OUT)
 
-    print(f"Building EMG network {model_name} with these hyperparameters:\nVOCAB_SIZE={tokenizer.get_vocab_size()}, EMBEDDING_DIM={EMBEDDING_DIM}, HIDDEN_DIM={HIDDEN_DIM}, NUM_LAYERS={NUM_LAYERS}")
+    print(f"Building EMG network {model_name} with these hyperparameters:\nTOKENIZER=MorPiece, EMBEDDING_DIM={EMBEDDING_DIM}, HIDDEN_DIM={HIDDEN_DIM}, NUM_LAYERS={NUM_LAYERS}")
 
     # Multi-GPU setup
     if torch.cuda.device_count() > 1:
