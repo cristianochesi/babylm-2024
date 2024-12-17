@@ -15,3 +15,6 @@ Here we include our original elaboration of some standard Recurrent Neural Netwo
 
 ### 04-evaluation
 Results of the lm-eval campaign for BabyLM 2024 are included here in .json format (BLiMP task).
+
+REFERENCE
+[Chesi et al. 2024 - Different Ways to Forget: Linguistic Gates in Recurrent Neural Networks](https://github.com/cristianochesi/babylm-2024/blob/main/chesi%20et%20al%202024%20-%20two%20ways%20to%20forget%20-%20BabyLM%202024.pdf)
